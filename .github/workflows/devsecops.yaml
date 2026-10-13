@@ -132,7 +132,7 @@ jobs:
           fi
       - name: SonarQube scan and quality gate
         if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
-        uses: SonarSource/sonarqube-scan-action@v5
+        uses: SonarSource/sonarqube-scan-action@v8
       - name: Save blocker and critical issues as a report
         if: always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
         run: |
