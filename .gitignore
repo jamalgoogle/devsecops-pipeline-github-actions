@@ -1,0 +1,8 @@
+node_modules/
+reports/
+.dc-data/
+.env
+*.log
+.DS_Store
+.terraform/
+*.tfstate*

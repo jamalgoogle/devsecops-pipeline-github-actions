@@ -1,0 +1,13 @@
+title = "NovaCart gitleaks config"
+
+# Keep every default rule (AWS keys, GitHub tokens, private keys, generic secrets...)
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files that never contain real secrets"
+paths = [
+  '''package-lock\.json$''',
+  # Intentionally insecure demo files (fake values, never deployed)
+  '''examples/insecure-terraform/.*''',
+]

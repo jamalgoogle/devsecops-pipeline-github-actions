@@ -1,0 +1,7 @@
+# Accepted findings. Every entry needs a reason and an expiry date, so it is
+# reviewed again instead of staying ignored forever.
+#
+# Format:  <ID> [exp:YYYY-MM-DD]
+# Example:
+#   # No fix available upstream, mitigated by network policy. Review by Q1.
+#   CVE-2099-00000 exp:2027-01-31

@@ -1,0 +1,272 @@
+name: DevSecOps pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly run catches CVEs published after the last commit
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Scanner versions are pinned, so a new release never changes results by surprise
+  TRIVY_IMAGE: aquasec/trivy:0.75.0
+  GITLEAKS_IMAGE: zricethezav/gitleaks:v8.30.1
+  DEPCHECK_IMAGE: owasp/dependency-check:13.0.0
+  IMAGE_NAME: novacart-payments-api
+  # Findings at these severities fail the pipeline
+  SEVERITY: HIGH,CRITICAL
+
+jobs:
+  # ------------------------------------------------------------------ 1. tests
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  # ------------------------------------------------------------------ 2. leaked secrets
+  secrets-scan:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # scan the full history, not only the latest commit
+      - name: Scan git history for secrets
+        run: |
+          mkdir -p reports
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/repo" "$GITLEAKS_IMAGE" detect \
+            --source /repo --config /repo/.gitleaks.toml \
+            --report-format sarif --report-path /repo/reports/gitleaks.sarif \
+            --redact --verbose --exit-code 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gitleaks-report
+          path: reports/
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 3. vulnerable dependencies
+  dependency-scan:
+    name: Dependency scan (npm audit, Trivy, OWASP Dependency-Check)
+    runs-on: ubuntu-latest
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: npm audit (fast check, production dependencies)
+        working-directory: app
+        run: npm audit --omit=dev --audit-level=high
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+
+      - name: Trivy dependency scan
+        run: ./scripts/ci-trivy.sh fs /src/app trivy-dependencies --scanners vuln --ignore-unfixed
+
+      - uses: actions/cache@v4
+        with:
+          path: .dc-data
+          key: dependency-check-data-${{ github.run_id }}
+          restore-keys: dependency-check-data-
+
+      - name: OWASP Dependency-Check (fails on CVSS 7.0 and above)
+        run: |
+          mkdir -p reports .dc-data
+          ARGS=(--scan /src/app --project "$IMAGE_NAME" --format HTML --format JSON --out /report
+                --failOnCVSS 7 --suppression /src/dependency-check-suppression.xml)
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            ARGS+=(--nvdApiKey "$NVD_API_KEY")
+          else
+            echo "::warning::NVD_API_KEY is not set, so the NVD download is slow and rate limited"
+          fi
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$PWD:/src:ro" -v "$PWD/reports:/report" \
+            -v "$PWD/.dc-data:/usr/share/dependency-check/data" \
+            "$DEPCHECK_IMAGE" "${ARGS[@]}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-reports
+          path: reports/
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 4. static code analysis
+  sast:
+    name: SAST (SonarQube)
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # SonarQube needs full history for new-code detection
+      - name: Check SonarQube configuration
+        run: |
+          if [ -z "$SONAR_TOKEN" ] || [ -z "$SONAR_HOST_URL" ]; then
+            echo "::warning::SONAR_TOKEN or SONAR_HOST_URL is not set, so the SAST stage was skipped"
+          fi
+      - name: SonarQube scan and quality gate
+        if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        uses: SonarSource/sonarqube-scan-action@v5
+      - name: Save blocker and critical issues as a report
+        if: always() && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        run: |
+          mkdir -p reports
+          curl -fsS -H "Authorization: Bearer ${SONAR_TOKEN}" \
+            "$SONAR_HOST_URL/api/issues/search?componentKeys=jamalgoogle_devsecops-pipeline-github-actions&severities=BLOCKER,CRITICAL&resolved=false&ps=500" \
+            -o reports/sonarqube-issues.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-report
+          path: reports/
+          retention-days: 30
+          if-no-files-found: ignore
+
+  # ------------------------------------------------------------------ 5. Terraform and Dockerfile misconfigurations
+  iac-scan:
+    name: "IaC scan (Trivy - Terraform and Dockerfile)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+      - name: Trivy misconfiguration scan
+        # examples/ holds intentionally insecure demo files and is excluded
+        run: ./scripts/ci-trivy.sh config /src iac-scan --skip-dirs examples --skip-dirs "**/node_modules"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: iac-report
+          path: reports/
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 6. container image
+  container-scan:
+    name: Container scan (Trivy image)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t "$IMAGE_NAME:${{ github.sha }}" app
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+      - name: Trivy image scan (OS packages, libraries and embedded secrets)
+        run: ./scripts/ci-trivy.sh image "$IMAGE_NAME:${{ github.sha }}" trivy-image --ignore-unfixed --scanners vuln,secret
+      - name: Generate the SBOM (CycloneDX)
+        if: always()
+        run: |
+          mkdir -p reports
+          docker run --rm -v "$PWD:/src" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
+            --format cyclonedx --output /src/reports/sbom.cdx.json "$IMAGE_NAME:${{ github.sha }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-report
+          path: reports/
+          retention-days: 30
+
+  # ------------------------------------------------------------------ 7. gate
+  security-gate:
+    name: Security gate
+    if: always()
+    needs: [test, secrets-scan, dependency-scan, sast, iac-scan, container-scan]
+    runs-on: ubuntu-latest
+    env:
+      R_TEST: ${{ needs.test.result }}
+      R_SECRETS: ${{ needs.secrets-scan.result }}
+      R_DEPS: ${{ needs.dependency-scan.result }}
+      R_SAST: ${{ needs.sast.result }}
+      R_IAC: ${{ needs.iac-scan.result }}
+      R_IMAGE: ${{ needs.container-scan.result }}
+    steps:
+      - name: Evaluate every stage
+        run: |
+          {
+            echo "### Security gate"
+            echo "| Stage | Result |"
+            echo "| --- | --- |"
+            echo "| Unit tests | $R_TEST |"
+            echo "| Secrets (Gitleaks) | $R_SECRETS |"
+            echo "| Dependencies (Trivy, Dependency-Check) | $R_DEPS |"
+            echo "| SAST (SonarQube) | $R_SAST |"
+            echo "| IaC (Trivy) | $R_IAC |"
+            echo "| Container image (Trivy) | $R_IMAGE |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for result in "$R_TEST" "$R_SECRETS" "$R_DEPS" "$R_SAST" "$R_IAC" "$R_IMAGE"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::At least one security stage failed or was cancelled"
+              exit 1
+            fi
+          done
+          echo "All stages passed"
+
+  # ------------------------------------------------------------------ 8. findings in the GitHub Security tab
+  code-scanning:
+    name: Publish findings to GitHub code scanning
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    needs: [secrets-scan, dependency-scan, iac-scan, container-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    continue-on-error: true   # needs a public repository or GitHub Advanced Security
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: sarif
+          pattern: "*-report*"
+      - uses: github/codeql-action/upload-sarif@v3
+        if: hashFiles('sarif/gitleaks-report/gitleaks.sarif') != ''
+        with:
+          sarif_file: sarif/gitleaks-report/gitleaks.sarif
+          category: gitleaks
+      - uses: github/codeql-action/upload-sarif@v3
+        if: hashFiles('sarif/dependency-reports/trivy-dependencies.sarif') != ''
+        with:
+          sarif_file: sarif/dependency-reports/trivy-dependencies.sarif
+          category: trivy-dependencies
+      - uses: github/codeql-action/upload-sarif@v3
+        if: hashFiles('sarif/iac-report/iac-scan.sarif') != ''
+        with:
+          sarif_file: sarif/iac-report/iac-scan.sarif
+          category: trivy-iac
+      - uses: github/codeql-action/upload-sarif@v3
+        if: hashFiles('sarif/image-report/trivy-image.sarif') != ''
+        with:
+          sarif_file: sarif/image-report/trivy-image.sarif
+          category: trivy-image

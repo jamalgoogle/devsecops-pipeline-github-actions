@@ -1,0 +1,19 @@
+{
+  "name": "novacart-payments-api",
+  "version": "1.0.0",
+  "description": "NovaCart Payments API - sample service used to demonstrate security scanning in CI/CD",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "author": "Bassem Jamal Hussein",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "helmet": "^8.0.0"
+  }
+}
