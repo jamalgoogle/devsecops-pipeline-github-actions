@@ -246,7 +246,7 @@ jobs:
       security-events: write
     continue-on-error: true   # needs a public repository or GitHub Advanced Security
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: sarif
           pattern: "*-report*"
