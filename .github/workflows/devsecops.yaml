@@ -57,7 +57,7 @@ jobs:
             --source /repo --config /repo/.gitleaks.toml \
             --report-format sarif --report-path /repo/reports/gitleaks.sarif \
             --redact --verbose --exit-code 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gitleaks-report
@@ -107,7 +107,7 @@ jobs:
             -v "$PWD/.dc-data:/usr/share/dependency-check/data" \
             "$DEPCHECK_IMAGE" "${ARGS[@]}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dependency-reports
@@ -140,7 +140,7 @@ jobs:
           curl -fsS -H "Authorization: Bearer ${SONAR_TOKEN}" \
             "$SONAR_HOST_URL/api/issues/search?componentKeys=jamalgoogle_devsecops-pipeline-github-actions&severities=BLOCKER,CRITICAL&resolved=false&ps=500" \
             -o reports/sonarqube-issues.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: sonarqube-report
@@ -162,7 +162,7 @@ jobs:
       - name: Trivy misconfiguration scan
         # examples/ holds intentionally insecure demo files and is excluded
         run: ./scripts/ci-trivy.sh config /src iac-scan --skip-dirs examples --skip-dirs "**/node_modules"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: iac-report
@@ -192,7 +192,7 @@ jobs:
           docker run --rm -v "$PWD:/src" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
             -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" image \
             --format cyclonedx --output /src/reports/sbom.cdx.json "$IMAGE_NAME:${{ github.sha }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: image-report
